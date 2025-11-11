@@ -67,7 +67,8 @@ func NewPublishedService(versionRepo repository.PublishedRepository,
 	monitoringService MonitoringService,
 	minioStorageService MinioStorageService,
 	systemInfoService SystemInfoService,
-	publishNotificationService PublishNotificationService) PublishedService {
+	publishNotificationService PublishNotificationService,
+	systemSettingsService SystemSettingsService) PublishedService {
 	return &publishedServiceImpl{
 		publishedRepo:              versionRepo,
 		buildRepository:            buildRepository,
@@ -79,6 +80,7 @@ func NewPublishedService(versionRepo repository.PublishedRepository,
 		systemInfoService:          systemInfoService,
 		publishedValidator:         validation.NewPublishedValidator(versionRepo),
 		publishNotificationService: publishNotificationService,
+		systemSettingsService:      systemSettingsService,
 	}
 }
 
@@ -93,6 +95,189 @@ type publishedServiceImpl struct {
 	systemInfoService          SystemInfoService
 	publishedValidator         validation.PublishedValidator
 	publishNotificationService PublishNotificationService
+	systemSettingsService      SystemSettingsService
+}
+
+func (p publishedServiceImpl) GetPackageVersions(packageId string) (*view.PublishedVersions, error) {
+	versions := make([]view.PublishedVersion, 0)
+	ents, err := p.publishedRepo.GetPackageVersions(packageId, "")
+	if err != nil {
+		return nil, err
+	}
+	for _, ent := range ents {
+		contentEnts, err := p.publishedRepo.GetRevisionContent(packageId, ent.Version, ent.Revision)
+		if err != nil {
+			return nil, err
+		}
+		refEnts, err := p.publishedRepo.GetRevisionRefs(packageId, ent.Version, ent.Revision)
+		if err != nil {
+			return nil, err
+		}
+		refViews, err := p.makeRefsView(refEnts)
+		if err != nil {
+			return nil, err
+		}
+		version := entity.MakePublishedVersionView(&ent, contentEnts, refViews)
+		versions = append(versions, *version)
+	}
+	return &view.PublishedVersions{Versions: versions}, nil
+}
+
+func (p publishedServiceImpl) GetVersion(packageId string, versionName string, importFiles bool, dependFiles bool) (*view.PublishedVersion, error) {
+	ent, err := p.getLatestRevision(packageId, versionName)
+	if err != nil {
+		return nil, err
+	}
+
+	filesEntsMap := make(map[string]entity.PublishedContentEntity)
+	packageFiles, err := p.publishedRepo.GetRevisionContent(packageId, versionName, ent.Revision)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, file := range packageFiles {
+		tmp := file
+		filesEntsMap[p.createRefFileId(file)] = tmp
+	}
+
+	refEntsInRefBlock, refEntsForFileBlock, err := p.evaluateRefsTree(packageId, versionName, ent.Revision)
+	if err != nil {
+		return nil, err
+	}
+
+	resultRefsViews, err := p.makeRefsView(refEntsInRefBlock)
+	if err != nil {
+		return nil, err
+	}
+
+	sort.Slice(resultRefsViews, func(aIndex, bIndex int) bool {
+		a := resultRefsViews[aIndex]
+		b := resultRefsViews[bIndex]
+		aKey := fmt.Sprintf("%s@@%s@@%s", a.Kind, a.PackageId, a.Version)
+		bKey := fmt.Sprintf("%s@@%s@@%s", b.Kind, b.PackageId, b.Version)
+		return aKey < bKey
+	})
+
+	for _, ref := range refEntsForFileBlock {
+		refEnt, err := p.getLatestRevision(ref.RefPackageId, ref.RefVersion)
+		if err != nil {
+			return nil, err
+		}
+
+		filesFromRefPackage, err := p.publishedRepo.GetRevisionContent(ref.RefPackageId, ref.RefVersion, refEnt.Revision)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, file := range filesFromRefPackage {
+			tmp := file
+			tmp.ReferenceId = ref.RefPackageId
+			filesEntsMap[p.createRefFileId(file)] = tmp
+		}
+	}
+
+	resultFilesEnts := make([]entity.PublishedContentEntity, 0)
+	for _, file := range filesEntsMap {
+		tmp := file
+		resultFilesEnts = append(resultFilesEnts, tmp)
+	}
+
+	sort.Slice(resultFilesEnts, func(aIndex, bIndex int) bool {
+		a := resultFilesEnts[aIndex]
+		b := resultFilesEnts[bIndex]
+		aKey := fmt.Sprintf("%s@@%v@@%s", a.ReferenceId, a.Index, a.Name)
+		bKey := fmt.Sprintf("%s@@%v@@%s", b.ReferenceId, b.Index, b.Name)
+		return aKey < bKey
+	})
+
+	version := entity.MakePublishedVersionView(ent, resultFilesEnts, resultRefsViews)
+	return version, nil
+}
+
+func (p publishedServiceImpl) getLatestRevision(packageId string, versionName string) (*entity.PublishedVersionEntity, error) {
+	ent, err := p.publishedRepo.GetVersion(packageId, versionName)
+	if err != nil {
+		return nil, err
+	}
+
+	if ent == nil {
+		return nil, &exception.CustomError{
+			Status:  http.StatusNotFound,
+			Code:    exception.PublishedVersionNotFound,
+			Message: exception.PublishedVersionNotFoundMsg,
+			Params:  map[string]interface{}{"version": versionName},
+		}
+	}
+	return ent, nil
+}
+
+func (p publishedServiceImpl) evaluateRefsTree(packageId string, versionName string, revision int) ([]entity.PublishedReferenceEntity, []entity.PublishedReferenceEntity, error) {
+	refEnts, err := p.publishedRepo.GetRevisionRefs(packageId, versionName, revision)
+	if err != nil {
+		return nil, nil, err
+	}
+	allExpandedReferences := make(map[string]entity.PublishedReferenceContainer)
+	for _, val := range refEnts {
+		if err = p.expandRefNode(val, allExpandedReferences); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	refsBlock := make([]entity.PublishedReferenceEntity, 0)
+	filesBlock := make([]entity.PublishedReferenceEntity, 0)
+
+	for _, container := range allExpandedReferences {
+		for _, ref := range container.References {
+			tmp := ref
+			filesBlock = append(filesBlock, tmp)
+			refsBlock = append(refsBlock, tmp)
+		}
+	}
+	return refsBlock, filesBlock, nil
+}
+
+func (p publishedServiceImpl) expandRefNode(refNode entity.PublishedReferenceEntity, allReferences map[string]entity.PublishedReferenceContainer) error {
+	if p.addReferenceContainer(refNode, allReferences) {
+		ent, err := p.getLatestRevision(refNode.RefPackageId, refNode.RefVersion)
+		if err != nil {
+			return err
+		}
+		subReferences, err := p.publishedRepo.GetRevisionRefs(refNode.RefPackageId, refNode.RefVersion, ent.Revision)
+		if err != nil || subReferences == nil {
+			return err
+		}
+
+		for _, subRef := range subReferences {
+			if err := p.expandRefNode(subRef, allReferences); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (p publishedServiceImpl) addReferenceContainer(ref entity.PublishedReferenceEntity, refMap map[string]entity.PublishedReferenceContainer) bool {
+	key := p.createRefId(ref)
+	if c, containerExists := refMap[key]; containerExists {
+		if _, refExists := c.References[ref.RefVersion]; refExists {
+			return false
+		} else {
+			c.References[ref.RefVersion] = ref
+			return true
+		}
+	} else {
+		container := entity.PublishedReferenceContainer{References: make(map[string]entity.PublishedReferenceEntity)}
+		container.References[ref.RefVersion] = ref
+		refMap[key] = container
+		return true
+	}
+}
+
+func (p publishedServiceImpl) createRefId(ref entity.PublishedReferenceEntity) string {
+	return fmt.Sprintf("%s@@%s@@%s@@%s", ref.PackageId, ref.Version, ref.RefPackageId, ref.RefVersion)
+}
+func (p publishedServiceImpl) createRefFileId(refFile entity.PublishedContentEntity) string {
+	return fmt.Sprintf("%s@@%s@@%s@@%s", refFile.PackageId, refFile.Version, refFile.FileId, refFile.ReferenceId)
 }
 
 func (p publishedServiceImpl) GetVersionSources(packageId string, versionName string) ([]byte, error) {
@@ -399,6 +584,13 @@ func (p publishedServiceImpl) PublishPackage(buildArc *archive.BuildResultArchiv
 	if err != nil {
 		return err
 	}
+
+	// Validate version name against global versionPattern
+	err = p.systemSettingsService.ValidateVersionName(buildArc.PackageInfo.Version)
+	if err != nil {
+		return err
+	}
+
 	if buildArc.PackageInfo.Revision == 0 {
 		buildArc.PackageInfo.Revision = 1
 		storedVersion, err := p.publishedRepo.GetVersionIncludingDeleted(buildArc.PackageInfo.PackageId, buildArc.PackageInfo.Version)

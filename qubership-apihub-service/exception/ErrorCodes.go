@@ -473,6 +473,12 @@ const PreviousVersionFromRequestIsEmptyMsg = "Previous version from request is e
 const InvalidReleaseVersionPatternFormat = "2604"
 const InvalidReleaseVersionPatternFormatMsg = "Release Version Pattern '$pattern' has invalid pattern format"
 
+const InvalidVersionPatternFormat = "2605"
+const InvalidVersionPatternFormatMsg = "Version Pattern '$pattern' has invalid pattern format"
+
+const VersionDoesntMatchPattern = "2606"
+const VersionDoesntMatchPatternMsg = "Version name '$version' doesn't match '$pattern' pattern"
+
 const BuildNotFoundByQuery = "2610"
 const BuildNotFoundByQueryMsg = "Build config not found by $query"
 

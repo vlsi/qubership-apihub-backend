@@ -199,6 +199,11 @@ func main() {
 	roleRepository := repository.NewRoleRepository(cp)
 	operationRepository := repository.NewOperationRepository(cp)
 	businessMetricRepository := repository.NewBusinessMetricRepository(cp)
+	systemSettingsRepository, err := repository.NewSystemSettingsRepositoryPG(cp)
+	if err != nil {
+		log.Error("Failed to create SystemSettingsRepository: " + err.Error())
+		panic("Failed to create SystemSettingsRepository: " + err.Error())
+	}
 
 	activityTrackingRepository := repository.NewActivityTrackingRepository(cp)
 
@@ -249,13 +254,14 @@ func main() {
 	activityTrackingService := service.NewActivityTrackingService(activityTrackingRepository, publishedRepository, userService)
 	operationService := service.NewOperationService(operationRepository, publishedRepository, packageVersionEnrichmentService)
 	roleService := service.NewRoleService(roleRepository, userService, activityTrackingService, publishedRepository)
+	systemSettingsService := service.NewSystemSettingsService(systemSettingsRepository)
 	ptHandler := service.NewPackageTransitionHandler(transitionRepository)
 	publishNotificationService := service.NewPublishNotificationService(olricProvider)
-	publishedService := service.NewPublishedService(publishedRepository, buildRepository, favoritesRepository, operationRepository, activityTrackingService, monitoringService, minioStorageService, systemInfoService, publishNotificationService)
+	publishedService := service.NewPublishedService(publishedRepository, buildRepository, favoritesRepository, operationRepository, activityTrackingService, monitoringService, minioStorageService, systemInfoService, publishNotificationService, systemSettingsService)
 	portalService := service.NewPortalService(basePath, publishedService, publishedRepository)
 
 	operationGroupService := service.NewOperationGroupService(operationRepository, publishedRepository, exportRepository, packageVersionEnrichmentService, activityTrackingService)
-	versionService := service.NewVersionService(favoritesRepository, publishedRepository, publishedService, operationRepository, exportRepository, operationService, activityTrackingService, systemInfoService, packageVersionEnrichmentService, portalService, versionCleanupRepository, operationGroupService)
+	versionService := service.NewVersionService(favoritesRepository, publishedRepository, publishedService, operationRepository, exportRepository, operationService, activityTrackingService, systemInfoService, systemSettingsService, packageVersionEnrichmentService, portalService, versionCleanupRepository, operationGroupService)
 	packageService := service.NewPackageService(favoritesRepository, publishedRepository, versionService, roleService, activityTrackingService, operationGroupService, usersRepository, ptHandler, systemInfoService)
 
 	logsService := service.NewLogsService()
@@ -302,6 +308,7 @@ func main() {
 
 	logsController := controller.NewLogsController(logsService, roleService)
 	systemInfoController := controller.NewSystemInfoController(systemInfoService, dbMigrationService)
+	systemSettingsController := controller.NewSystemSettingsController(systemSettingsService)
 	sysAdminController := controller.NewSysAdminController(roleService)
 	apihubApiKeyController := controller.NewApihubApiKeyController(apihubApiKeyService, roleService)
 	cleanupController := controller.NewCleanupController(cleanupService)
@@ -337,6 +344,8 @@ func main() {
 	r.HandleFunc("/api/v1/system/info", security.Secure(systemInfoController.GetSystemInfo)).Methods(http.MethodGet)
 	r.HandleFunc("/api/v1/system/configuration", samlAuthController.GetSystemSSOInfo_deprecated).Methods(http.MethodGet) //deprecated
 	r.HandleFunc("/api/v2/system/configuration", security.NoSecure(authController.GetSystemConfigurationInfo)).Methods(http.MethodGet)
+	r.HandleFunc("/api/v1/system/settings/versionPattern", security.Secure(systemSettingsController.GetVersionPattern)).Methods(http.MethodGet)
+	r.HandleFunc("/api/v1/system/settings/versionPattern", security.Secure(systemSettingsController.UpdateVersionPattern)).Methods(http.MethodPut)
 
 	r.HandleFunc("/api/v1/debug/logs", security.Secure(logsController.StoreLogs)).Methods(http.MethodPut)
 	r.HandleFunc("/api/v1/debug/logs/setLevel", security.Secure(logsController.SetLogLevel)).Methods(http.MethodPost)

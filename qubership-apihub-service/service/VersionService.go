@@ -78,6 +78,7 @@ func NewVersionService(favoritesRepo repository.FavoritesRepository,
 	operationService OperationService,
 	atService ActivityTrackingService,
 	systemInfoService SystemInfoService,
+	systemSettingsService SystemSettingsService,
 	packageVersionEnrichmentService PackageVersionEnrichmentService,
 	portalService PortalService,
 	versionCleanupRepository repository.VersionCleanupRepository,
@@ -91,6 +92,7 @@ func NewVersionService(favoritesRepo repository.FavoritesRepository,
 		operationService:                operationService,
 		atService:                       atService,
 		systemInfoService:               systemInfoService,
+		systemSettingsService:           systemSettingsService,
 		packageVersionEnrichmentService: packageVersionEnrichmentService,
 		portalService:                   portalService,
 		versionCleanupRepository:        versionCleanupRepository,
@@ -107,6 +109,7 @@ type versionServiceImpl struct {
 	operationService                OperationService
 	atService                       ActivityTrackingService
 	systemInfoService               SystemInfoService
+	systemSettingsService           SystemSettingsService
 	packageVersionEnrichmentService PackageVersionEnrichmentService
 	portalService                   PortalService
 	versionCleanupRepository        repository.VersionCleanupRepository
@@ -468,6 +471,13 @@ func (v versionServiceImpl) PatchVersion(ctx context.SecurityContext, packageId 
 	if status != nil {
 		newStatus := *status
 		if newStatus == string(view.Release) {
+			// Validate against global versionPattern first
+			err = v.systemSettingsService.ValidateVersionName(versionEnt.Version)
+			if err != nil {
+				return nil, err
+			}
+
+			// Then validate against package-level releaseVersionPattern
 			packEnt, err := v.publishedRepo.GetPackage(packageId)
 			if err != nil {
 				return nil, err
